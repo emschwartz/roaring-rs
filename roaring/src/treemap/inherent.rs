@@ -439,6 +439,27 @@ impl RoaringTreemap {
         changed
     }
 
+    /// Shrinks the capacity of the underlying bitmaps as much as possible.
+    ///
+    /// See [`RoaringBitmap::shrink_to_fit`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use roaring::RoaringTreemap;
+    ///
+    /// let a = RoaringTreemap::from_iter(0..1000);
+    /// let b = RoaringTreemap::from_iter(990..2000);
+    /// let mut rb = &a & &b;
+    /// rb.shrink_to_fit();
+    /// assert_eq!(rb, RoaringTreemap::from_iter(990..1000));
+    /// ```
+    pub fn shrink_to_fit(&mut self) {
+        for bitmap in self.map.values_mut() {
+            bitmap.shrink_to_fit();
+        }
+    }
+
     /// Retains only the elements specified by the predicate.
     ///
     /// In other word, remove all elements `e` such that `f(e)` returns `false`.
@@ -588,6 +609,19 @@ mod test {
     use proptest::collection::{btree_map, vec};
     use proptest::prelude::*;
     use proptest::sample::Index;
+
+    #[test]
+    fn shrink_to_fit() {
+        let lhs = RoaringTreemap::from_iter((0..2000).chain((1 << 32)..(1 << 32) + 2000));
+        let rhs = RoaringTreemap::from_iter((1990..4000).chain((1 << 32) + 1990..(1 << 32) + 4000));
+        let mut treemap = &lhs & &rhs;
+        assert!(treemap.bitmaps().all(|(_, bitmap)| bitmap.has_spare_capacity()));
+
+        let before = treemap.clone();
+        treemap.shrink_to_fit();
+        assert!(treemap.bitmaps().all(|(_, bitmap)| !bitmap.has_spare_capacity()));
+        assert_eq!(treemap, before);
+    }
 
     proptest! {
         #[test]

@@ -895,6 +895,29 @@ impl RoaringBitmap {
         changed
     }
 
+    /// Shrinks the capacity of the bitmap's containers as much as possible.
+    ///
+    /// Operations such as intersections and differences can leave containers
+    /// with room for more values than they hold. This frees that memory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use roaring::RoaringBitmap;
+    ///
+    /// let a = RoaringBitmap::from_iter(0..1000);
+    /// let b = RoaringBitmap::from_iter(990..2000);
+    /// let mut rb = &a & &b;
+    /// rb.shrink_to_fit();
+    /// assert_eq!(rb, RoaringBitmap::from_iter(990..1000));
+    /// ```
+    pub fn shrink_to_fit(&mut self) {
+        self.containers.shrink_to_fit();
+        for container in &mut self.containers {
+            container.store.shrink_to_fit();
+        }
+    }
+
     /// Ensure the bitmap is internally valid
     ///
     /// This is useful for development, but is not needed for normal use:
@@ -935,11 +958,26 @@ impl Clone for RoaringBitmap {
 }
 
 #[cfg(test)]
+impl RoaringBitmap {
+    pub(crate) fn has_spare_capacity(&self) -> bool {
+        use crate::bitmap::store::Store;
+
+        self.containers.capacity() > self.containers.len()
+            || self.containers.iter().any(|container| match &container.store {
+                Store::Array(array) => array.capacity() > array.len() as usize,
+                Store::Bitmap(_) => false,
+                Store::Run(runs) => runs.capacity() > runs.run_amount() as usize,
+            })
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use proptest::collection::vec;
     use proptest::prelude::*;
 
     use super::*;
+    use crate::bitmap::store::Store;
 
     proptest! {
         #[test]
@@ -1274,5 +1312,51 @@ mod tests {
             bitmap.retain(|_| false);
             prop_assert!(bitmap.is_empty());
         }
+    }
+
+    #[test]
+    fn shrink_to_fit() {
+        // Key 3 is in both bitmaps but not in their intersection
+        let mut lhs = RoaringBitmap::from_iter(
+            (0..2000)
+                .step_by(2)
+                .chain((0x1_0000..0x2_0000).step_by(2))
+                .chain(0x2_0000..0x2_1000)
+                .chain([0x3_0000]),
+        );
+        let mut rhs = RoaringBitmap::from_iter(
+            (1980..4000)
+                .step_by(2)
+                .chain((0x1_0000..0x2_0000).step_by(2))
+                .chain((0x2_0000..0x2_0300).filter(|x| x % 0x100 < 0x10))
+                .chain([0x3_0001]),
+        );
+        lhs.optimize();
+        rhs.optimize();
+        let mut bitmap = &lhs & &rhs;
+
+        let stores: Vec<_> = bitmap.containers.iter().map(|c| &c.store).collect();
+        let [Store::Array(array), Store::Bitmap(_), Store::Run(runs)] = stores[..] else {
+            panic!("expected an array, a bitmap and a run container");
+        };
+        assert!(bitmap.containers.capacity() > bitmap.containers.len());
+        assert!(array.capacity() > array.len() as usize);
+        assert!(runs.capacity() > runs.run_amount() as usize);
+
+        let before = bitmap.clone();
+        bitmap.shrink_to_fit();
+        assert!(!bitmap.has_spare_capacity());
+        assert_eq!(bitmap, before);
+    }
+
+    #[test]
+    fn shrink_to_fit_empty() {
+        let mut bitmap = RoaringBitmap::from_iter([1, 0x1_0000]);
+        bitmap.remove_range(..);
+        assert!(bitmap.has_spare_capacity());
+
+        bitmap.shrink_to_fit();
+        assert!(!bitmap.has_spare_capacity());
+        assert!(bitmap.is_empty());
     }
 }
